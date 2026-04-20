@@ -223,26 +223,27 @@ def main():
     if not GOOGLE_DRIVE_FOLDER_ID:
         raise ValueError("GOOGLE_DRIVE_FOLDER_ID is empty in .env")
 
-    source_folder_name = "images"
-
     print("Connecting to Google Drive...")
     service = get_drive_service()
 
     print("Fetching files from Drive...")
-    folders_list = [GOOGLE_DRIVE_FOLDER_ID,
-                    DOCUMENTS_FOLDER,
-                    IMAGES_FOLDER,
-                    RECEIPTS_FOLDER,
-                    SCREENSHOTS_FOLDER]
+    folders_list = [(GOOGLE_DRIVE_FOLDER_ID,"Personal-Agent-Inbox "),
+                    (DOCUMENTS_FOLDER,"documents"),
+                    (IMAGES_FOLDER,"images"),
+                    (RECEIPTS_FOLDER,"receipts"),
+                    (SCREENSHOTS_FOLDER,"screenshots")]
     try:
         conn = get_db_connection()
-        for folder in folders_list:
+        TotalInsert = 0
+        TotalSkip = 0
+        for folder,source_folder_name in folders_list:
             drive_files = fetch_drive_files(service, folder)
 
             print(f"Found {len(drive_files)} file(s) in Drive folder.")
 
             inserted, skipped = insert_missing_files(conn, drive_files, source_folder=source_folder_name)
-
+            TotalInsert += inserted
+            TotalSkip += skipped
             update_sync_run(
                 conn=conn,
                 status="success",
@@ -260,6 +261,9 @@ def main():
                 print("\nTop 10 files by last updated:")
                 for file in drive_files[:10]:
                     print(f"- {file.get('modifiedTime')} | {file.get('name')} ({file.get('id')})")
+
+        print(f"Total Inserted {TotalInsert} new file(s) into SQLite.")
+        print(f"Total Skipped {TotalSkip} existing file(s).")
 
     finally:
         conn.close()

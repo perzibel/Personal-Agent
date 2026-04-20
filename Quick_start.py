@@ -5,8 +5,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-SCOPES = ["https://www.googleapis.com/auth/drive.metadata.readonly"]
 
+SCOPES = ["https://www.googleapis.com/auth/drive.metadata.readonly"]
 
 ### List of folders IDs in Drive for future reference
 root_folder = "1YHcoRlCSwGrncYa2oDjb7nXHCkxaE4_F"
@@ -14,6 +14,7 @@ documents_folder = "1Q_VS6lFk6CLq9X6RvBn6sRiqNW1oFG9N"
 images_folder = "1xhMSzvqTmzeGcrGXPvQaSvrg-MOEizjy"
 receipts_folder = "1wwn9JukWwAmmdt7av07BezQZd-ubPmTy"
 screenshots_folder = "1xJ4Xn9Ql7cNSXObhGUY7qkge-rpylqCz"
+
 
 def main():
     creds = None

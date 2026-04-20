@@ -34,6 +34,7 @@ if TESSERACT_CMD:
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
+
 def is_supported_mvp_type(mime_type: str, suffix_lower: str) -> bool:
     mime_lower = (mime_type or "").lower()
 
@@ -47,6 +48,7 @@ def is_supported_mvp_type(mime_type: str, suffix_lower: str) -> bool:
         return True
 
     return False
+
 
 def get_db_connection():
     SQLITE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)

@@ -3,7 +3,7 @@ from app.chroma_config import get_chroma_client, get_or_create_collection
 client = get_chroma_client()
 collection = get_or_create_collection(client)
 
-results = collection.get(limit=10)
+results = collection.get()
 
 print("IDs:")
 print(results.get("ids"))
