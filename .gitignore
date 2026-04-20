@@ -7,3 +7,5 @@ credentials.json
 .venv/
 data/tmp/*
 Quick_start.py
+data/agent_memory.db
+data/chroma/*
