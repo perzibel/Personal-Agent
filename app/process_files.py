@@ -23,7 +23,11 @@ from app.config import (
     GOOGLE_OAUTH_CREDENTIALS,
     GOOGLE_TOKEN_PATH,
     TEMP_DOWNLOAD_DIR,
-    TESSERACT_CMD
+    TESSERACT_CMD,
+    VISION_ENABLED,
+    VISION_MODEL_NAME,
+    VISION_GENERATE_SUMMARY,
+    VISION_GENERATE_JSON,
 )
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
@@ -219,7 +223,9 @@ def extract_image_metadata_and_caption(file_path: Path, source_folder: str, file
         image.close()
 
 
-def infer_entities(file_name: str, source_folder: str, extracted_text: str, ocr_text: str, image_caption: str):
+def infer_entities(file_name: str, source_folder: str, extracted_text: str, ocr_text: str, image_caption: str,
+                   visual_summary: str | None,
+                   vision_json: str | None):
     entities = []
     haystack = " ".join([
         (file_name or ""),
@@ -227,6 +233,8 @@ def infer_entities(file_name: str, source_folder: str, extracted_text: str, ocr_
         (extracted_text or ""),
         (ocr_text or ""),
         (image_caption or ""),
+        (visual_summary or ""),
+        (vision_json or ""),
     ]).lower()
 
     def add(entity_type: str, entity_value: str, confidence: float, source: str):
@@ -288,8 +296,8 @@ def delete_chroma_chunks_for_file(collection, file_id: int):
         pass
 
 
-def upsert_file_content(conn, file_id: int, extracted_text: str, ocr_text: str, image_caption: str,
-                        raw_metadata_json: str):
+def upsert_file_content(conn, file_id: int, extracted_text: str | None, ocr_text: str | None, image_caption: str | None,
+                        visual_summary: str | None, vision_json: str | None, raw_metadata_json: str | None):
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -298,17 +306,21 @@ def upsert_file_content(conn, file_id: int, extracted_text: str, ocr_text: str, 
             extracted_text,
             ocr_text,
             image_caption,
+            visual_summary,
+            vision_json,
             raw_metadata_json,
             created_at,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             file_id,
             extracted_text,
             ocr_text,
             image_caption,
+            visual_summary,
+            vision_json,
             raw_metadata_json,
             utc_now_iso(),
             utc_now_iso(),
@@ -342,7 +354,8 @@ def insert_entities(conn, file_id: int, entities: list[tuple]):
     conn.commit()
 
 
-def build_chunk_records(file_id: int, file_row: dict, extracted_text: str, ocr_text: str, image_caption: str):
+def build_chunk_records(file_id: int, file_row: dict, extracted_text: str, ocr_text: str, image_caption: str, visual_summary: str | None,
+                   vision_json: str | None):
     records = []
 
     if extracted_text:
@@ -361,7 +374,7 @@ def build_chunk_records(file_id: int, file_row: dict, extracted_text: str, ocr_t
                     "file_type": file_row["mime_type"] or "unknown",
                     "source_folder": file_row["source_folder"] or "",
                     "chunk_type": "document_text",
-                    "chunk_index": idx,
+                    "chunk_index": idx
                 },
             })
 
@@ -381,7 +394,7 @@ def build_chunk_records(file_id: int, file_row: dict, extracted_text: str, ocr_t
                     "file_type": file_row["mime_type"] or "unknown",
                     "source_folder": file_row["source_folder"] or "",
                     "chunk_type": "ocr_text",
-                    "chunk_index": idx,
+                    "chunk_index": idx
                 },
             })
 
@@ -400,7 +413,28 @@ def build_chunk_records(file_id: int, file_row: dict, extracted_text: str, ocr_t
                 "file_type": file_row["mime_type"] or "unknown",
                 "source_folder": file_row["source_folder"] or "",
                 "chunk_type": "caption",
+                "chunk_index": 0
+            },
+        })
+
+    if visual_summary:
+        records.append({
+            "chunk_id": f"file_{file_id}_chunk_0_visual_summary",
+            "chunk_index": 0,
+            "chunk_type": "visual_summary",
+            "chunk_text": visual_summary,
+            "char_start": 0,
+            "char_end": len(visual_summary),
+            "metadata": {
+                "file_id": file_id,
+                "drive_file_id": file_row["drive_file_id"],
+                "file_name": file_row["file_name"],
+                "file_type": file_row["mime_type"] or "unknown",
+                "source_folder": file_row["source_folder"] or "",
+                "chunk_type": "visual_summary",
                 "chunk_index": 0,
+                "visual_summary": visual_summary,
+                "vision_json": vision_json
             },
         })
 
@@ -440,7 +474,7 @@ def insert_chunks_into_sqlite(conn, file_id: int, chunk_records: list[dict]):
     conn.commit()
 
 
-def upsert_chunks_to_chroma(collection, chunk_records: list[dict]):
+def upsert_chunks_to_chroma(collection, chunk_records: list[dict],file_id):
     if not chunk_records:
         return
 
@@ -452,6 +486,7 @@ def upsert_chunks_to_chroma(collection, chunk_records: list[dict]):
 
 
 def process_single_file(conn, service, collection, row):
+    global vision_json
     file_id, drive_file_id, file_name, mime_type, source_folder, drive_modified_time = row
 
     file_row = {
@@ -482,6 +517,8 @@ def process_single_file(conn, service, collection, row):
     image_caption = ""
     raw_metadata_json = "{}"
     exif_capture_time = None
+    visual_summary = ""
+    vision_json = "{}"
 
     mime_lower = (mime_type or "").lower()
     suffix_lower = temp_path.suffix.lower()
@@ -502,6 +539,10 @@ def process_single_file(conn, service, collection, row):
         raw_metadata_json = image_data["raw_metadata_json"]
         exif_capture_time = image_data["exif_capture_time"]
 
+        from app.vision_utils import analyze_image_with_vision_model
+        visual_summary, vision_json = analyze_image_with_vision_model(temp_path)
+
+
     else:
         raise RuntimeError(
             f"SKIP_UNSUPPORTED: mime_type={mime_type}, suffix={suffix_lower}"
@@ -517,6 +558,8 @@ def process_single_file(conn, service, collection, row):
         ocr_text=ocr_text,
         image_caption=image_caption,
         raw_metadata_json=raw_metadata_json,
+        vision_json=vision_json,
+        visual_summary=visual_summary
     )
 
     update_exif_capture_time(conn, file_id, exif_capture_time)
@@ -527,6 +570,8 @@ def process_single_file(conn, service, collection, row):
         extracted_text=extracted_text,
         ocr_text=ocr_text,
         image_caption=image_caption,
+        visual_summary=visual_summary,
+        vision_json=vision_json,
     )
     insert_entities(conn, file_id, entities)
 
@@ -536,10 +581,11 @@ def process_single_file(conn, service, collection, row):
         extracted_text=extracted_text,
         ocr_text=ocr_text,
         image_caption=image_caption,
+        visual_summary=visual_summary,
+        vision_json=vision_json,
     )
-
     insert_chunks_into_sqlite(conn, file_id, chunk_records)
-    upsert_chunks_to_chroma(collection, chunk_records)
+    upsert_chunks_to_chroma(collection, chunk_records,file_id)
 
     mark_file_processing_status(conn, file_id, "processed", None)
 

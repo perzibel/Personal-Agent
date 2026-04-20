@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS file_content (
     extracted_text TEXT,
     ocr_text TEXT,
     image_caption TEXT,
+    visual_summary TEXT,
+    vision_json TEXT,
     raw_metadata_json TEXT,
     content_language TEXT,
     content_summary TEXT,
@@ -104,6 +106,21 @@ CREATE INDEX IF NOT EXISTS idx_generated_outputs_file_id ON generated_outputs(fi
 """
 
 
+def column_exists(conn: sqlite3.Connection, table_name: str, column_name: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return any(row[1] == column_name for row in rows)
+
+
+def migrate_file_content_schema(conn: sqlite3.Connection) -> None:
+    if not column_exists(conn, "file_content", "visual_summary"):
+        conn.execute("ALTER TABLE file_content ADD COLUMN visual_summary TEXT;")
+        print("Added column: file_content.visual_summary")
+
+    if not column_exists(conn, "file_content", "vision_json"):
+        conn.execute("ALTER TABLE file_content ADD COLUMN vision_json TEXT;")
+        print("Added column: file_content.vision_json")
+
+
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -111,8 +128,12 @@ def init_db() -> None:
     try:
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.executescript(SCHEMA_SQL)
+
+        # Apply migrations for existing databases
+        migrate_file_content_schema(conn)
+
         conn.commit()
-        print(f"Database created successfully at: {DB_PATH}")
+        print(f"Database initialized successfully at: {DB_PATH}")
     finally:
         conn.close()
 
