@@ -15,7 +15,7 @@ from app.config import (
     SCREENSHOTS_FOLDER,
 )
 
-SCOPES = ["https://www.googleapis.com/auth/drive.metadata.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.metadata.readonly"]
 
 
 def get_drive_service():
@@ -94,6 +94,23 @@ def main():
 
     except HttpError as error:
         print(f"An error occurred: {error}")
+
+    try:
+        # Full first initiative flow
+        # Import all relevant functions from all files
+        from app.init_db import init_db
+        from app.sync_drive import main as sync_main
+        from app.process_files import main as process_main
+        from app.check_processed import main as check_main
+
+        # Run the initiate flow in the right order
+        init_db()
+        sync_main()
+        process_main()
+        check_main()
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 
 if __name__ == "__main__":
