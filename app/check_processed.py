@@ -9,8 +9,6 @@ def main():
     cursor.execute("""
         SELECT *
         FROM files
-        ORDER BY last_processed_at DESC
-        LIMIT 20
     """)
 
     rows = cursor.fetchall()
