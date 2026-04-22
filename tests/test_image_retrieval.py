@@ -30,6 +30,34 @@ TEST_QUERIES = [
 ]
 
 
+def print_query_results(query_text: str, n_results: int = 5):
+    results = query_collection(query_text, n_results=n_results)
+
+    ids = results.get("ids", [[]])[0]
+    documents = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+    distances = results.get("distances", [[]])[0] if "distances" in results else []
+
+    print("\n" + "=" * 100)
+    print(f"QUERY: {query_text}")
+    print("=" * 100)
+
+    for i, chunk_id in enumerate(ids):
+        print(f"\nResult #{i + 1}")
+        print(f"ID: {chunk_id}")
+
+        if i < len(distances):
+            print(f"Distance: {distances[i]}")
+
+        if i < len(documents):
+            print(f"Document: {documents[i]}")
+
+        if i < len(metadatas):
+            print("Metadata:")
+            for k, v in metadatas[i].items():
+                print(f"  {k}: {v}")
+
+
 def query_collection(query_text: str, n_results: int = 10):
     client = get_chroma_client()
     collection = get_or_create_collection(client)
@@ -101,34 +129,6 @@ def test_sensitive_id_query_returns_results():
     documents = results.get("documents", [[]])[0]
 
     assert len(documents) > 0
-
-
-def print_query_results(query_text: str, n_results: int = 5):
-    results = query_collection(query_text, n_results=n_results)
-
-    ids = results.get("ids", [[]])[0]
-    documents = results.get("documents", [[]])[0]
-    metadatas = results.get("metadatas", [[]])[0]
-    distances = results.get("distances", [[]])[0] if "distances" in results else []
-
-    print("\n" + "=" * 100)
-    print(f"QUERY: {query_text}")
-    print("=" * 100)
-
-    for i, chunk_id in enumerate(ids):
-        print(f"\nResult #{i + 1}")
-        print(f"ID: {chunk_id}")
-
-        if i < len(distances):
-            print(f"Distance: {distances[i]}")
-
-        if i < len(documents):
-            print(f"Document: {documents[i]}")
-
-        if i < len(metadatas):
-            print("Metadata:")
-            for k, v in metadatas[i].items():
-                print(f"  {k}: {v}")
 
 
 if __name__ == "__main__":

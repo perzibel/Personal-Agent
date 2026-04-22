@@ -197,12 +197,12 @@ def normalize_visual_json(visual_json):
 
 
 def infer_tags(
-    file_name: str = "",
-    source_folder: str = "",
-    ocr_text: str = "",
-    image_caption: str = "",
-    visual_summary: str = "",
-    visual_json: dict | None = None,
+        file_name: str = "",
+        source_folder: str = "",
+        ocr_text: str = "",
+        image_caption: str = "",
+        visual_summary: str = "",
+        visual_json: dict | None = None,
 ) -> list[str]:
     tags = set()
 
@@ -241,7 +241,7 @@ def infer_tags(
     if any(x in combined for x in [
         "passport", "identity card", "id card", "national id",
         "driver license", "driver's license", "driver licence", "driver's licence",
-        "license number", "licence number", "id number", "document number"
+        "license number", "licence number", "id number", "document number", "CV"
     ]):
         tags.add("identity_doc")
         tags.add("document")
@@ -263,11 +263,10 @@ def infer_tags(
 
     if any(x in combined for x in ["baby bottle", "bottle feeding", "feeding bottle"]):
         tags.add("baby_bottle")
-        tags.add("baby_related")
 
     # Receipt
     if any(x in combined for x in [
-        "receipt", "tax invoice", "invoice", "subtotal", "total", "cash", "visa"
+        "receipt", "tax invoice", "invoice", "subtotal", "total", "cash", "visa", "pdf", "cv"
     ]):
         tags.add("receipt")
         tags.add("document")
@@ -489,7 +488,7 @@ def delete_chroma_chunks_for_file(collection, file_id: int):
 
 def upsert_file_content(conn, file_id: int, extracted_text: str | None, ocr_text: str | None, image_caption: str | None,
                         visual_summary: str | None, vision_json: str | None, raw_metadata_json: str | None, tags_json:
-                        dict | None):
+        dict | None):
     cursor = conn.cursor()
     tags_json = ', '.join(tags_json)
     cursor.execute(
@@ -682,7 +681,8 @@ def upsert_chunks_to_chroma(collection, chunk_records: list[dict], file_id):
 
 
 def process_single_file(conn, service, collection, row):
-    global vision_json, tags_json
+    vision_json = ""
+    tags_json = ""
     file_id, drive_file_id, file_name, mime_type, source_folder, drive_modified_time = row
 
     file_row = {
