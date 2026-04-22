@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS file_content (
     raw_metadata_json TEXT,
     content_language TEXT,
     content_summary TEXT,
+    tags_json TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE

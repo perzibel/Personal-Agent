@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from app.vision_utils import analyze_image_with_vision_model
 
 import fitz  # PyMuPDF
 import pytesseract
@@ -173,7 +174,206 @@ def extract_ocr_text(file_path: Path) -> str:
         image.close()
 
 
-def extract_image_metadata_and_caption(file_path: Path, source_folder: str, file_name: str):
+def normalize_visual_json(visual_json):
+    if visual_json is None:
+        return None
+
+    if isinstance(visual_json, dict):
+        return visual_json
+
+    if isinstance(visual_json, str):
+        visual_json = visual_json.strip()
+        if not visual_json:
+            return None
+        try:
+            parsed = json.loads(visual_json)
+            if isinstance(parsed, dict):
+                return parsed
+            return None
+        except json.JSONDecodeError:
+            return None
+
+    return None
+
+
+def infer_tags(
+    file_name: str = "",
+    source_folder: str = "",
+    ocr_text: str = "",
+    image_caption: str = "",
+    visual_summary: str = "",
+    visual_json: dict | None = None,
+) -> list[str]:
+    tags = set()
+
+    file_name_lower = (file_name or "").lower()
+    source_lower = (source_folder or "").lower()
+    ocr_lower = (ocr_text or "").lower()
+    caption_lower = (image_caption or "").lower()
+    summary_lower = (visual_summary or "").lower()
+
+    visual_parts = []
+    if isinstance(visual_json, dict):
+        for key in ["scene_type", "document_type"]:
+            value = visual_json.get(key)
+            if value:
+                visual_parts.append(str(value).lower())
+
+        for key in ["people", "objects", "text_visible", "activities", "brand_names", "locations"]:
+            values = visual_json.get(key, [])
+            if isinstance(values, list):
+                visual_parts.extend(str(v).lower() for v in values if v)
+
+        raw_tags = visual_json.get("tags") or visual_json.get("Tags") or []
+        if isinstance(raw_tags, list):
+            visual_parts.extend(str(v).lower() for v in raw_tags if v)
+
+    combined = " ".join([
+        file_name_lower,
+        source_lower,
+        ocr_lower,
+        caption_lower,
+        summary_lower,
+        " ".join(visual_parts),
+    ])
+
+    # Identity documents
+    if any(x in combined for x in [
+        "passport", "identity card", "id card", "national id",
+        "driver license", "driver's license", "driver licence", "driver's licence",
+        "license number", "licence number", "id number", "document number"
+    ]):
+        tags.add("identity_doc")
+        tags.add("document")
+
+    # Baby / child
+    if any(x in combined for x in [
+        "baby", "infant", "newborn", "toddler", "child", "mother and child", "parenting"
+    ]):
+        tags.add("baby_related")
+
+    # Specific baby objects
+    if "stroller" in combined:
+        tags.add("stroller")
+        tags.add("baby_related")
+
+    if "crib" in combined:
+        tags.add("crib")
+        tags.add("baby_related")
+
+    if any(x in combined for x in ["baby bottle", "bottle feeding", "feeding bottle"]):
+        tags.add("baby_bottle")
+        tags.add("baby_related")
+
+    # Receipt
+    if any(x in combined for x in [
+        "receipt", "tax invoice", "invoice", "subtotal", "total", "cash", "visa"
+    ]):
+        tags.add("receipt")
+        tags.add("document")
+
+    # Booking / reservation
+    if any(x in combined for x in [
+        "booking", "reservation", "check-in", "check out", "check-out",
+        "hotel", "flight", "boarding pass", "airbnb", "confirmation number"
+    ]):
+        tags.add("booking")
+        tags.add("document")
+        tags.add("travel")
+
+    # Screenshot
+    if "screenshot" in combined or file_name_lower.startswith("screenshot_"):
+        tags.add("screenshot")
+
+    # Document / form
+    if any(x in combined for x in [
+        "form", "application", "statement", "certificate", "document",
+        "technical support documentation", "knowledge base article"
+    ]):
+        tags.add("document")
+
+    # Sensitive
+    if "identity_doc" in tags:
+        tags.add("sensitive")
+
+    return sorted(tags)
+
+
+def build_image_caption(
+        source_folder: str,
+        file_name: str,
+        ocr_text: str = "",
+        visual_json: dict | None = None,
+) -> str:
+    file_name_lower = (file_name or "").lower()
+    source_lower = (source_folder or "").lower()
+    ocr_lower = (ocr_text or "").lower()
+    visual_json = normalize_visual_json(visual_json)
+
+    if visual_json:
+        scene_type = visual_json.get("scene_type")
+        document_type = visual_json.get("document_type")
+        people = visual_json.get("people", [])
+        objects = visual_json.get("objects", [])
+        activities = visual_json.get("activities", [])
+        text_visible = visual_json.get("text_visible", [])
+        brand_names = visual_json.get("brand_names", [])
+        tags = visual_json.get("tags", [])
+
+        parts = []
+
+        if document_type:
+            parts.append(document_type)
+
+        if scene_type and scene_type != document_type:
+            parts.append(f"showing {scene_type.lower()}")
+
+        if people:
+            parts.append(f"with {people[0].rstrip('.')}")
+
+        if activities:
+            parts.append(f"related to {activities[0].rstrip('.').lower()}")
+
+        # Add a few notable visible elements
+        notable_objects = objects[:2]
+        if notable_objects:
+            parts.append(
+                "including " + ", ".join(obj.rstrip(".") for obj in notable_objects)
+            )
+
+        if brand_names:
+            parts.append(f"associated with {', '.join(brand_names[:2])}")
+
+        if text_visible:
+            visible_text = ", ".join(str(x) for x in text_visible[:4])
+            parts.append(f"visible text: {visible_text}")
+
+        caption = ", ".join(parts).strip()
+        if caption:
+            return caption
+
+    if any(x in ocr_lower for x in ["passport", "identity", "driver", "license", "id"]):
+        return "Image that may contain an identity document"
+
+    if "receipt" in source_lower or "receipt" in file_name_lower:
+        return "Photo or screenshot of a receipt"
+
+    if "screenshot" in source_lower or "screenshot" in file_name_lower:
+        return "Screenshot containing visible text or app content"
+
+    if "baby" in source_lower or "baby" in file_name_lower:
+        return "Photo likely related to a baby"
+
+    if ocr_text.strip():
+        short_ocr = " ".join(ocr_text.split())[:120]
+        return f"Image containing visible text: {short_ocr}"
+
+    # 3. Final fallback
+    return f"Image from folder '{source_folder}' named '{file_name}'"
+
+
+def extract_image_metadata_and_caption(file_path: Path, source_folder: str, file_name: str,
+                                       visual_json: dict | None = None, ):
     image = Image.open(file_path)
     try:
         exif_capture_time = None
@@ -187,7 +387,6 @@ def extract_image_metadata_and_caption(file_path: Path, source_folder: str, file
             # 36867 = DateTimeOriginal
             date_original = exif.get(36867)
             if date_original:
-                # Typical EXIF format: 2026:04:18 10:30:11
                 try:
                     exif_capture_time = datetime.strptime(
                         str(date_original), "%Y:%m:%d %H:%M:%S"
@@ -196,25 +395,17 @@ def extract_image_metadata_and_caption(file_path: Path, source_folder: str, file
                     exif_capture_time = str(date_original)
 
         ocr_text = pytesseract.image_to_string(image).strip()
-
-        # MVP caption: lightweight caption based on folder/name/OCR clues
-        file_name_lower = file_name.lower()
-        source_lower = (source_folder or "").lower()
         ocr_lower = ocr_text.lower()
 
-        if "receipt" in source_lower or "receipt" in file_name_lower:
-            caption = "Photo or screenshot of a receipt"
-        elif "screenshot" in source_lower or "screenshot" in file_name_lower:
-            caption = "Screenshot containing visible text or app content"
-        elif any(x in ocr_lower for x in ["passport", "identity", "driver", "license", "id"]):
-            caption = "Image that may contain an identity document"
-        elif "baby" in source_lower or "baby" in file_name_lower:
-            caption = "Photo likely related to a baby"
-        else:
-            caption = f"Image from folder '{source_folder}' named '{file_name}'"
+        caption = build_image_caption(
+            source_folder=source_folder,
+            file_name=file_name,
+            ocr_text=ocr_text,
+            visual_json=visual_json,
+        )
 
         return {
-            "ocr_text": ocr_text,
+            "ocr_text": ocr_lower,
             "image_caption": caption,
             "exif_capture_time": exif_capture_time,
             "raw_metadata_json": json.dumps({"exif": raw_exif}, ensure_ascii=False),
@@ -297,8 +488,10 @@ def delete_chroma_chunks_for_file(collection, file_id: int):
 
 
 def upsert_file_content(conn, file_id: int, extracted_text: str | None, ocr_text: str | None, image_caption: str | None,
-                        visual_summary: str | None, vision_json: str | None, raw_metadata_json: str | None):
+                        visual_summary: str | None, vision_json: str | None, raw_metadata_json: str | None, tags_json:
+                        dict | None):
     cursor = conn.cursor()
+    tags_json = ', '.join(tags_json)
     cursor.execute(
         """
         INSERT INTO file_content (
@@ -310,9 +503,10 @@ def upsert_file_content(conn, file_id: int, extracted_text: str | None, ocr_text
             vision_json,
             raw_metadata_json,
             created_at,
-            updated_at
+            updated_at,
+            tags_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,?)
         """,
         (
             file_id,
@@ -324,6 +518,7 @@ def upsert_file_content(conn, file_id: int, extracted_text: str | None, ocr_text
             raw_metadata_json,
             utc_now_iso(),
             utc_now_iso(),
+            tags_json,
         ),
     )
     conn.commit()
@@ -354,8 +549,9 @@ def insert_entities(conn, file_id: int, entities: list[tuple]):
     conn.commit()
 
 
-def build_chunk_records(file_id: int, file_row: dict, extracted_text: str, ocr_text: str, image_caption: str, visual_summary: str | None,
-                   vision_json: str | None):
+def build_chunk_records(file_id: int, file_row: dict, extracted_text: str, ocr_text: str, image_caption: str,
+                        visual_summary: str | None,
+                        vision_json: str | None):
     records = []
 
     if extracted_text:
@@ -474,7 +670,7 @@ def insert_chunks_into_sqlite(conn, file_id: int, chunk_records: list[dict]):
     conn.commit()
 
 
-def upsert_chunks_to_chroma(collection, chunk_records: list[dict],file_id):
+def upsert_chunks_to_chroma(collection, chunk_records: list[dict], file_id):
     if not chunk_records:
         return
 
@@ -486,7 +682,7 @@ def upsert_chunks_to_chroma(collection, chunk_records: list[dict],file_id):
 
 
 def process_single_file(conn, service, collection, row):
-    global vision_json
+    global vision_json, tags_json
     file_id, drive_file_id, file_name, mime_type, source_folder, drive_modified_time = row
 
     file_row = {
@@ -533,15 +729,14 @@ def process_single_file(conn, service, collection, row):
         extracted_text = extract_text_from_txt(temp_path)
 
     elif mime_lower.startswith("image/") or suffix_lower in [".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"]:
-        image_data = extract_image_metadata_and_caption(temp_path, source_folder or "", file_name or "")
+        visual_summary, vision_json = analyze_image_with_vision_model(temp_path)
+        image_data = extract_image_metadata_and_caption(temp_path, source_folder or "", file_name or "",
+                                                        vision_json or "")
         ocr_text = image_data["ocr_text"]
         image_caption = image_data["image_caption"]
         raw_metadata_json = image_data["raw_metadata_json"]
         exif_capture_time = image_data["exif_capture_time"]
-
-        from app.vision_utils import analyze_image_with_vision_model
-        visual_summary, vision_json = analyze_image_with_vision_model(temp_path)
-
+        tags_json = infer_tags(file_name, source_folder, ocr_text, image_caption, visual_summary, vision_json)
 
     else:
         raise RuntimeError(
@@ -559,7 +754,8 @@ def process_single_file(conn, service, collection, row):
         image_caption=image_caption,
         raw_metadata_json=raw_metadata_json,
         vision_json=vision_json,
-        visual_summary=visual_summary
+        visual_summary=visual_summary,
+        tags_json=tags_json,
     )
 
     update_exif_capture_time(conn, file_id, exif_capture_time)
@@ -585,7 +781,7 @@ def process_single_file(conn, service, collection, row):
         vision_json=vision_json,
     )
     insert_chunks_into_sqlite(conn, file_id, chunk_records)
-    upsert_chunks_to_chroma(collection, chunk_records,file_id)
+    upsert_chunks_to_chroma(collection, chunk_records, file_id)
 
     mark_file_processing_status(conn, file_id, "processed", None)
 
