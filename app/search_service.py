@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Iterable
+from typing import Any
+from chromadb.api.models.Collection import Collection
 
 
 @dataclass
@@ -32,7 +34,19 @@ _ALLOWED_DATE_FIELDS = {
     "first_seen_at",
     "last_processed_at",
 }
-
+MATCH_TYPE_WEIGHTS = {
+    "exact_query": 1.00,
+    "file_name": 0.95,
+    "tag": 0.90,
+    "metadata": 0.80,
+    "semantic": 0.70,
+}
+CHUNK_TYPE_WEIGHTS = {
+    "visual_summary": 0.20,
+    "image_caption": 0.15,
+    "extracted_text": 0.10,
+    "ocr_text": -0.10,
+}
 
 def _safe_text(value: str | None) -> str:
     return value or ""
@@ -185,9 +199,223 @@ def _row_to_result(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def get_result_file_id(item: dict[str, Any]) -> Any:
+    return item.get("file_id") or item.get("id") or item.get("drive_file_id")
+
+
+def build_match_reason(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": item.get("source"),
+        "match_type": item.get("match_type"),
+        "chunk_type": item.get("chunk_type"),
+        "score": item.get("score"),
+        "distance": item.get("distance"),
+        "why_matched": item.get("why_matched"),
+        "text_preview": (item.get("text") or "")[:300],
+    }
+
+
+def calculate_keyword_boost(query: str, text: str | None) -> float:
+    if not query or not text:
+        return 0.0
+
+    query_lower = query.lower().strip()
+    text_lower = text.lower()
+
+    if query_lower in text_lower:
+        return 0.25
+
+    query_terms = [
+        term.strip()
+        for term in query_lower.split()
+        if len(term.strip()) >= 3
+    ]
+
+    if not query_terms:
+        return 0.0
+
+    matched_terms = sum(
+        1 for term in query_terms
+        if term in text_lower
+    )
+
+    return min(0.20, 0.08 * matched_terms)
+
+
+def normalize_score(value: float | int | None, default: float = 0.0) -> float:
+    if value is None:
+        return default
+
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+
+    if value < 0:
+        return 0.0
+
+    return value
+
+
+def calculate_result_score(
+    item: dict[str, Any],
+    query: str,
+) -> float:
+    match_type = item.get("match_type")
+    chunk_type = item.get("chunk_type")
+
+    raw_score = normalize_score(item.get("score"))
+
+    match_type_boost = MATCH_TYPE_WEIGHTS.get(match_type, 0.50)
+    chunk_type_boost = CHUNK_TYPE_WEIGHTS.get(chunk_type, 0.0)
+
+    searchable_text = " ".join(
+        str(value or "")
+        for value in [
+            item.get("file_name"),
+            item.get("text"),
+            item.get("source_folder"),
+            item.get("file_category"),
+        ]
+    )
+
+    keyword_boost = calculate_keyword_boost(query, searchable_text)
+
+    final_score = raw_score + match_type_boost + chunk_type_boost + keyword_boost
+
+    return round(final_score, 6)
+
+
+def semantic_search_chroma(
+    collection: Collection,
+    query: str,
+    limit: int = 10,
+    chunk_types: list[str] | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Search ChromaDB using semantic similarity.
+
+    This returns fuzzy meaning-based matches from embedded chunks.
+    Useful for matching:
+    - visual summaries
+    - captions
+    - OCR text
+    - extracted document text
+    """
+
+    if not query or not query.strip():
+        return []
+
+    where_filter = None
+
+    if chunk_types:
+        where_filter = {
+            "chunk_type": {
+                "$in": chunk_types
+            }
+        }
+
+    results = collection.query(
+        query_texts=[query.strip()],
+        n_results=limit,
+        where=where_filter,
+        include=[
+            "documents",
+            "metadatas",
+            "distances",
+        ],
+    )
+
+    documents = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+    distances = results.get("distances", [[]])[0]
+    ids = results.get("ids", [[]])[0]
+
+    search_results: list[dict[str, Any]] = []
+
+    for doc_id, document, metadata, distance in zip(
+            ids,
+            documents,
+            metadatas,
+            distances,
+    ):
+        metadata = metadata or {}
+        file_id = metadata.get("file_id")
+        sqlite_file = None
+
+        if conn is not None and file_id is not None:
+            sqlite_file = get_file_by_id(
+                conn=conn,
+                file_id=int(file_id),
+            )
+
+        file_data = sqlite_file or {}
+
+        search_results.append(
+            {
+                "source": "chroma",
+                "match_type": "semantic",
+                "chunk_id": doc_id,
+
+                # Prefer SQLite source of truth
+                "file_id": file_data.get("id") or file_id,
+                "file_name": file_data.get("file_name") or metadata.get("file_name"),
+                "drive_file_id": file_data.get("drive_file_id") or metadata.get("drive_file_id"),
+                "drive_web_link": file_data.get("drive_web_link") or metadata.get("drive_web_link"),
+                "mime_type": file_data.get("mime_type") or metadata.get("mime_type"),
+                "source_folder": file_data.get("source_folder") or metadata.get("source_folder"),
+
+                # Time fields from SQLite
+                "drive_created_time": file_data.get("drive_created_time"),
+                "drive_modified_time": file_data.get("drive_modified_time"),
+                "exif_capture_time": file_data.get("exif_capture_time"),
+                "first_seen_at": file_data.get("first_seen_at"),
+                "last_synced_at": file_data.get("last_synced_at"),
+                "last_processed_at": file_data.get("last_processed_at"),
+
+                # Optional convenience field
+                "created_at": (
+                        file_data.get("exif_capture_time")
+                        or file_data.get("drive_created_time")
+                        or file_data.get("first_seen_at")
+                ),
+
+                "file_category": file_data.get("file_category"),
+                "processing_status": file_data.get("processing_status"),
+
+                # Chunk-level fields from Chroma
+                "chunk_type": metadata.get("chunk_type"),
+                "text": document,
+                "distance": distance,
+                "score": 1 / (1 + distance) if distance is not None else None,
+
+                "why_matched": {
+                    "reason": "Semantic similarity in ChromaDB",
+                    "query": query,
+                    "matched_chunk_type": metadata.get("chunk_type"),
+                    "matched_text_preview": document[:500] if document else "",
+                    "distance": distance,
+                    "sqlite_metadata_found": sqlite_file is not None,
+                    "created_at_source": (
+                        "exif_capture_time"
+                        if file_data.get("exif_capture_time")
+                        else "drive_created_time"
+                        if file_data.get("drive_created_time")
+                        else "first_seen_at"
+                        if file_data.get("first_seen_at")
+                        else None
+                    ),
+                },
+            }
+        )
+
+    return search_results
+
+
 def search_sqlite_metadata(
-    conn: sqlite3.Connection,
-    filters: SearchFilters,
+        conn: sqlite3.Connection,
+        filters: SearchFilters,
 ) -> list[dict[str, Any]]:
     """
     Search across:
@@ -429,10 +657,10 @@ def search_sqlite_metadata(
 
 
 def search_sqlite_by_query(
-    conn: sqlite3.Connection,
-    query: str,
-    limit: int = 25,
-    offset: int = 0,
+        conn: sqlite3.Connection,
+        query: str,
+        limit: int = 25,
+        offset: int = 0,
 ) -> list[dict[str, Any]]:
     return search_sqlite_metadata(
         conn,
@@ -445,10 +673,10 @@ def search_sqlite_by_query(
 
 
 def search_sqlite_by_tags(
-    conn: sqlite3.Connection,
-    tags: Iterable[str],
-    limit: int = 25,
-    offset: int = 0,
+        conn: sqlite3.Connection,
+        tags: Iterable[str],
+        limit: int = 25,
+        offset: int = 0,
 ) -> list[dict[str, Any]]:
     return search_sqlite_metadata(
         conn,
@@ -461,10 +689,10 @@ def search_sqlite_by_tags(
 
 
 def search_sqlite_by_file_name(
-    conn: sqlite3.Connection,
-    file_name: str,
-    limit: int = 25,
-    offset: int = 0,
+        conn: sqlite3.Connection,
+        file_name: str,
+        limit: int = 25,
+        offset: int = 0,
 ) -> list[dict[str, Any]]:
     return search_sqlite_metadata(
         conn,
@@ -477,12 +705,12 @@ def search_sqlite_by_file_name(
 
 
 def search_sqlite_by_date_range(
-    conn: sqlite3.Connection,
-    date_from: str | None = None,
-    date_to: str | None = None,
-    date_field: str = "best_available",
-    limit: int = 25,
-    offset: int = 0,
+        conn: sqlite3.Connection,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        date_field: str = "best_available",
+        limit: int = 25,
+        offset: int = 0,
 ) -> list[dict[str, Any]]:
     return search_sqlite_metadata(
         conn,
@@ -494,3 +722,325 @@ def search_sqlite_by_date_range(
             offset=offset,
         ),
     )
+
+
+def get_file_by_id(
+    conn: sqlite3.Connection,
+    file_id: int,
+) -> dict[str, Any] | None:
+    """
+    Fetch file-level metadata from SQLite.
+
+    SQLite should be the source of truth for file metadata like:
+    - drive_web_link
+    - drive_created_time
+    - drive_modified_time
+    - exif_capture_time
+    - first_seen_at
+    - last_synced_at
+    - last_processed_at
+    """
+
+    conn.row_factory = sqlite3.Row
+
+    row = conn.execute(
+        """
+        SELECT
+            id,
+            drive_file_id,
+            file_name,
+            mime_type,
+            source_folder,
+            drive_web_link,
+            drive_created_time,
+            drive_modified_time,
+            exif_capture_time,
+            first_seen_at,
+            last_synced_at,
+            last_processed_at,
+            file_category,
+            processing_status
+        FROM files
+        WHERE id = ?
+        """,
+        (file_id,),
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    return dict(row)
+
+
+def merge_result_into_file(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+    query: str,
+) -> dict[str, Any]:
+    existing_reasons = existing.setdefault("match_reasons", [])
+    existing_reasons.append(build_match_reason(incoming))
+
+    existing["match_count"] = len(existing_reasons)
+
+    incoming_rank_score = calculate_result_score(incoming, query)
+    existing_rank_score = normalize_score(existing.get("rank_score"))
+
+    existing["rank_score"] = round(existing_rank_score + incoming_rank_score, 6)
+
+    existing["best_match_score"] = max(
+        normalize_score(existing.get("best_match_score")),
+        incoming_rank_score,
+    )
+
+    existing["matched_sources"] = sorted(
+        set(existing.get("matched_sources", []))
+        | {str(incoming.get("source"))}
+    )
+
+    existing["matched_types"] = sorted(
+        set(existing.get("matched_types", []))
+        | {str(incoming.get("match_type"))}
+    )
+
+    if incoming.get("chunk_type"):
+        existing["matched_chunk_types"] = sorted(
+            set(existing.get("matched_chunk_types", []))
+            | {str(incoming.get("chunk_type"))}
+        )
+
+    # Prefer non-empty metadata from incoming
+    for field in [
+        "file_id",
+        "file_name",
+        "drive_file_id",
+        "drive_web_link",
+        "mime_type",
+        "source_folder",
+        "drive_created_time",
+        "drive_modified_time",
+        "exif_capture_time",
+        "first_seen_at",
+        "last_synced_at",
+        "last_processed_at",
+        "created_at",
+        "file_category",
+        "processing_status",
+    ]:
+        if not existing.get(field) and incoming.get(field):
+            existing[field] = incoming.get(field)
+
+    return existing
+
+
+def search_all(
+    conn: sqlite3.Connection,
+    collection: Collection,
+    query: str,
+    limit: int = 10,
+    semantic_limit: int = 25,
+    include_ocr: bool = False,
+) -> list[dict[str, Any]]:
+    """
+    Search across SQLite and ChromaDB, merge results by file_id,
+    and return one ranked list.
+
+    Sources:
+    - SQLite exact / metadata query
+    - SQLite filename search
+    - SQLite tag search
+    - Chroma semantic search
+    """
+
+    if not query or not query.strip():
+        return []
+
+    query = query.strip()
+
+    all_results: list[dict[str, Any]] = []
+
+    # 1. SQLite broad metadata/text query
+    try:
+        sqlite_query_results = search_sqlite_by_query(
+            conn=conn,
+            query=query,
+            limit=limit * 3,
+        )
+
+        for item in sqlite_query_results:
+            item["source"] = item.get("source") or "sqlite"
+            item["match_type"] = item.get("match_type") or "exact_query"
+            all_results.append(item)
+
+    except Exception as error:
+        all_results.append(
+            {
+                "source": "sqlite",
+                "match_type": "exact_query",
+                "error": str(error),
+                "score": 0,
+            }
+        )
+
+    # 2. SQLite filename search
+    try:
+        filename_results = search_sqlite_by_file_name(
+            conn=conn,
+            file_name=query,
+            limit=limit * 3,
+        )
+
+        for item in filename_results:
+            item["source"] = item.get("source") or "sqlite"
+            item["match_type"] = item.get("match_type") or "file_name"
+            all_results.append(item)
+
+    except Exception as error:
+        all_results.append(
+            {
+                "source": "sqlite",
+                "match_type": "file_name",
+                "error": str(error),
+                "score": 0,
+            }
+        )
+
+    # 3. SQLite tag search
+    try:
+        tag_results = search_sqlite_by_tags(
+            conn=conn,
+            tags=[query],
+            limit=limit * 3,
+        )
+
+        for item in tag_results:
+            item["source"] = item.get("source") or "sqlite"
+            item["match_type"] = item.get("match_type") or "tag"
+            all_results.append(item)
+
+    except Exception as error:
+        all_results.append(
+            {
+                "source": "sqlite",
+                "match_type": "tag",
+                "error": str(error),
+                "score": 0,
+            }
+        )
+
+    # 4. Chroma semantic search
+    semantic_chunk_types = [
+        "visual_summary",
+        "image_caption",
+        "extracted_text",
+    ]
+
+    if include_ocr:
+        semantic_chunk_types.append("ocr_text")
+
+    try:
+        semantic_results = semantic_search_chroma(
+            collection=collection,
+            conn=conn,
+            query=query,
+            limit=semantic_limit,
+            chunk_types=semantic_chunk_types,
+        )
+
+        for item in semantic_results:
+            item["source"] = item.get("source") or "chroma"
+            item["match_type"] = item.get("match_type") or "semantic"
+            all_results.append(item)
+
+    except Exception as error:
+        all_results.append(
+            {
+                "source": "chroma",
+                "match_type": "semantic",
+                "error": str(error),
+                "score": 0,
+            }
+        )
+
+    # 5. Merge by file_id
+    merged_by_file: dict[Any, dict[str, Any]] = {}
+
+    for item in all_results:
+        if item.get("error"):
+            continue
+
+        file_key = get_result_file_id(item)
+
+        if not file_key:
+            continue
+
+        if file_key not in merged_by_file:
+            base = {
+                "file_id": item.get("file_id") or item.get("id"),
+                "file_name": item.get("file_name"),
+                "drive_file_id": item.get("drive_file_id"),
+                "drive_web_link": item.get("drive_web_link"),
+                "mime_type": item.get("mime_type"),
+                "source_folder": item.get("source_folder"),
+                "drive_created_time": item.get("drive_created_time"),
+                "drive_modified_time": item.get("drive_modified_time"),
+                "exif_capture_time": item.get("exif_capture_time"),
+                "first_seen_at": item.get("first_seen_at"),
+                "last_synced_at": item.get("last_synced_at"),
+                "last_processed_at": item.get("last_processed_at"),
+                "created_at": item.get("created_at"),
+                "file_category": item.get("file_category"),
+                "processing_status": item.get("processing_status"),
+                "rank_score": 0.0,
+                "best_match_score": 0.0,
+                "match_count": 0,
+                "matched_sources": [],
+                "matched_types": [],
+                "matched_chunk_types": [],
+                "match_reasons": [],
+            }
+
+            merged_by_file[file_key] = base
+
+        merge_result_into_file(
+            existing=merged_by_file[file_key],
+            incoming=item,
+            query=query,
+        )
+
+    ranked_results = list(merged_by_file.values())
+
+    # 6. Extra bonus for files with multiple independent signals
+    for item in ranked_results:
+        source_count = len(item.get("matched_sources", []))
+        type_count = len(item.get("matched_types", []))
+        match_count = item.get("match_count", 0)
+
+        multi_signal_boost = 0.0
+
+        if source_count >= 2:
+            multi_signal_boost += 0.30
+
+        if type_count >= 2:
+            multi_signal_boost += 0.20
+
+        if match_count >= 3:
+            multi_signal_boost += 0.15
+
+        item["multi_signal_boost"] = round(multi_signal_boost, 6)
+        item["rank_score"] = round(
+            normalize_score(item.get("rank_score")) + multi_signal_boost,
+            6,
+        )
+
+    # 7. Sort final results
+    ranked_results.sort(
+        key=lambda item: (
+            item.get("rank_score") or 0,
+            item.get("best_match_score") or 0,
+            item.get("match_count") or 0,
+        ),
+        reverse=True,
+    )
+
+    return ranked_results[:limit]
+
