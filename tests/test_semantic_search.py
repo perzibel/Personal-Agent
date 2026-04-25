@@ -36,7 +36,7 @@ def main():
                 print(f"Matched text: {item.get('why_matched', {}).get('matched_text_preview')}")
                 print(f"Matched type: {item.get('why_matched', {}).get('matched_chunk_type')}")
                 print(
-                    f"Matched distance: {item.get('why_matched', {}).get('distance')} ## the higher this is, the worst "
+                    f"Matched distance: {dis} ## the higher this is, the worst "
                     f"the result, should be close to 0")
                 print("-" * 80)
 
