@@ -26,7 +26,7 @@
 
 ## What is this project?
 
-**Personal-Agnet** is a local-first personal agent project designed to help you search, understand, and reason over your own files.
+**Personal-Agent** is a local-first personal agent project designed to help you search, understand, and reason over your own files.
 
 The goal is simple:
 
