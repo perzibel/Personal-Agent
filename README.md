@@ -1,4 +1,4 @@
-# Personal-Agnet
+# Personal-Agent
 
 ```text
                          _________________________
@@ -601,11 +601,5 @@ more accurate search
 + compact answer context
 = a personal agent that actually feels useful
 ```
-
-And yes, the name currently says **Personal-Agnet**.
-
-That is either a typo...
-
-or branding.
 
 No one knows yet.
