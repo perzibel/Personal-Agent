@@ -3,7 +3,6 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Iterable
-from typing import Any
 from chromadb.api.models.Collection import Collection
 
 
@@ -26,6 +25,103 @@ class SearchFilters:
     offset: int = 0
 
 
+@dataclass
+class RetrievalResult:
+    source: str
+    match_type: str
+    file_id: Any
+    ocr_text: str | None = None
+    extracted_text: str | None = None
+    image_caption: str | None = None
+    visual_summary: str | None = None
+    content_summary: str | None = None
+    file_name: str | None = None
+    drive_file_id: str | None = None
+    drive_web_link: str | None = None
+    mime_type: str | None = None
+    source_folder: str | None = None
+    file_category: str | None = None
+    processing_status: str | None = None
+
+    drive_created_time: str | None = None
+    drive_modified_time: str | None = None
+    exif_capture_time: str | None = None
+    first_seen_at: str | None = None
+    last_synced_at: str | None = None
+    last_processed_at: str | None = None
+    created_at: str | None = None
+
+    chunk_id: str | None = None
+    chunk_type: str | None = None
+    text: str | None = None
+
+    entity_type: str | None = None
+    entity_value: str | None = None
+
+    score: float = 0.0
+    distance: float | None = None
+
+    matched_fields: list[str] = field(default_factory=list)
+    matched_terms: list[str] = field(default_factory=list)
+    match_reasons: list[Any] = field(default_factory=list)
+    match_snippets: dict[str, str] = field(default_factory=dict)
+
+    why_matched: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "match_type": self.match_type,
+            "file_id": self.file_id,
+            "ocr_text": self.ocr_text,
+            "extracted_text": self.extracted_text,
+            "image_caption": self.image_caption,
+            "visual_summary": self.visual_summary,
+            "content_summary": self.content_summary,
+            "file_name": self.file_name,
+            "drive_file_id": self.drive_file_id,
+            "drive_web_link": self.drive_web_link,
+            "mime_type": self.mime_type,
+            "source_folder": self.source_folder,
+            "file_category": self.file_category,
+            "processing_status": self.processing_status,
+
+            "drive_created_time": self.drive_created_time,
+            "drive_modified_time": self.drive_modified_time,
+            "exif_capture_time": self.exif_capture_time,
+            "first_seen_at": self.first_seen_at,
+            "last_synced_at": self.last_synced_at,
+            "last_processed_at": self.last_processed_at,
+            "created_at": self.created_at,
+
+            "chunk_id": self.chunk_id,
+            "chunk_type": self.chunk_type,
+            "text": self.text,
+
+            "entity_type": self.entity_type,
+            "entity_value": self.entity_value,
+
+            "score": self.score,
+            "distance": self.distance,
+
+            "matched_fields": self.matched_fields,
+            "matched_terms": self.matched_terms,
+            "match_reasons": self.match_reasons,
+            "match_snippets": self.match_snippets,
+
+            "why_matched": self.why_matched,
+            "raw": self.raw,
+        }
+
+
+SEMANTIC_DISTANCE_LIMITS = {
+    "extracted_text": 0.55,
+    "ocr_text": 0.60,
+    "visual_summary": 0.62,
+    "image_caption": 0.62,
+    "default": 0.60,
+}
 _ALLOWED_DATE_FIELDS = {
     "best_available",
     "drive_created_time",
@@ -39,7 +135,7 @@ MATCH_TYPE_WEIGHTS = {
     "file_name": 0.95,
     "tag": 0.90,
     "metadata": 0.80,
-    "semantic": 0.70,
+    "semantic": 0.15,
 }
 CHUNK_TYPE_WEIGHTS = {
     "visual_summary": 0.20,
@@ -47,9 +143,104 @@ CHUNK_TYPE_WEIGHTS = {
     "extracted_text": 0.10,
     "ocr_text": -0.10,
 }
+IMAGE_DATE_KEYWORDS = {
+    "image",
+    "images",
+    "photo",
+    "photos",
+    "picture",
+    "pictures",
+    "pic",
+    "pics",
+    "jpg",
+    "jpeg",
+    "png",
+    "screenshot",
+    "screenshots",
+}
+FIRST_DATE_KEYWORDS = {
+    "first",
+    "oldest",
+    "earliest",
+    "initial",
+}
+LAST_DATE_KEYWORDS = {
+    "last",
+    "latest",
+    "newest",
+    "recent",
+    "most recent",
+}
+
 
 def _safe_text(value: str | None) -> str:
     return value or ""
+
+
+def is_semantic_match_acceptable(result: dict) -> bool:
+    distance = result.get("distance")
+    chunk_type = result.get("chunk_type") or "default"
+
+    if distance is None:
+        return False
+
+    max_distance = SEMANTIC_DISTANCE_LIMITS.get(
+        chunk_type,
+        SEMANTIC_DISTANCE_LIMITS["default"],
+    )
+
+    return distance <= max_distance
+
+
+def should_keep_merged_result(result: dict[str, Any]) -> bool:
+    """
+    Remove low-confidence merged results.
+
+    Main rule:
+    - If a file only matched semantically through Chroma,
+      require a strong semantic distance.
+    - If it matched SQLite exact/name/tag/metadata, keep it.
+    """
+
+    reasons = result.get("match_reasons", [])
+
+    positive_reasons = [
+        reason for reason in reasons
+        if normalize_score(reason.get("score")) > 0
+    ]
+
+    if not positive_reasons:
+        return False
+
+    sources = {
+        reason.get("source")
+        for reason in positive_reasons
+        if reason.get("source")
+    }
+
+    match_types = {
+        reason.get("match_type")
+        for reason in positive_reasons
+        if reason.get("match_type")
+    }
+
+    semantic_only = sources == {"chroma"} or match_types == {"semantic"}
+
+    if not semantic_only:
+        return True
+
+    distances = [
+        reason.get("distance")
+        for reason in positive_reasons
+        if reason.get("distance") is not None
+    ]
+
+    if not distances:
+        return False
+
+    best_distance = min(distances)
+
+    return best_distance <= 0.55
 
 
 def _build_snippet(text: str, needle: str, radius: int = 60) -> str:
@@ -127,6 +318,34 @@ def _explain_match(row_result: dict[str, Any], query: str, requested_tags: list[
     row_result["matched_fields"] = matched_fields
     row_result["match_reasons"] = match_reasons
     row_result["match_snippets"] = match_snippets
+
+    matched_terms = sorted(
+        {
+            token
+            for token in query_tokens
+            if any(
+            token in _safe_text(field_value).lower()
+            for field_value in fields_to_check.values()
+        )
+               or token in entity_tags
+        }
+    )
+
+    row_result["matched_terms"] = matched_terms
+
+    try:
+        current_score = float(row_result.get("score") or 0)
+    except (TypeError, ValueError):
+        current_score = 0.0
+
+    # Important:
+    # The SQL WHERE may match individual query tokens like "liron" and "cv",
+    # while score_sql only scores the full phrase "liron cv".
+    # Give token-level SQLite matches a positive score so they are not filtered out.
+    if current_score <= 0 and matched_fields:
+        token_score = 20 + (10 * len(matched_terms)) + (5 * len(matched_fields))
+        row_result["score"] = token_score
+
     return row_result
 
 
@@ -168,6 +387,81 @@ def _build_date_expr(date_field: str) -> str:
     return f"f.{date_field}"
 
 
+def parse_datetime_value(value: str | None):
+    if not value:
+        return None
+
+    value = str(value).strip()
+    if not value:
+        return None
+
+    try:
+        from datetime import datetime
+
+        # Handles ISO values like:
+        # 2026-04-18T10:28:14.819Z
+        # 2026-04-18T10:28:14
+        normalized = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized)
+
+    except ValueError:
+        return None
+
+
+def get_image_event_datetime(item: dict[str, Any]):
+    """
+    For image first/last questions, prefer:
+    1. EXIF capture time - when the picture was actually taken
+    2. Drive created time - when the file entered Drive
+    3. Drive modified time - fallback only
+    """
+
+    for field_name in [
+        "exif_capture_time",
+        "drive_created_time",
+        "drive_modified_time",
+    ]:
+        parsed = parse_datetime_value(item.get(field_name))
+        if parsed is not None:
+            return parsed
+
+    return None
+
+
+def get_image_event_date_source(item: dict[str, Any]) -> str | None:
+    for field_name in [
+        "exif_capture_time",
+        "drive_created_time",
+        "drive_modified_time",
+    ]:
+        if parse_datetime_value(item.get(field_name)) is not None:
+            return field_name
+
+    return None
+
+
+def is_image_like_result(item: dict[str, Any]) -> bool:
+    mime_type = str(item.get("mime_type") or "").lower()
+    file_name = str(item.get("file_name") or "").lower()
+    file_category = str(item.get("file_category") or "").lower()
+
+    if mime_type.startswith("image/"):
+        return True
+
+    if file_category in {"image", "photo", "screenshot"}:
+        return True
+
+    return file_name.endswith((
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+        ".heic",
+        ".heif",
+    ))
+
+
 def _row_to_result(row: sqlite3.Row) -> dict[str, Any]:
     tags = []
     raw_tags = row["entity_tags"]
@@ -200,18 +494,203 @@ def _row_to_result(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def get_result_file_id(item: dict[str, Any]) -> Any:
-    return item.get("file_id") or item.get("id") or item.get("drive_file_id")
+    """
+    After normalization, file_id should be the canonical merge key.
+    drive_file_id is only a fallback for legacy/unprocessed hits.
+    """
+    return item.get("file_id") or item.get("drive_file_id")
+
+
+def normalize_retrieval_result(
+        item: dict[str, Any],
+        default_source: str,
+        default_match_type: str,
+) -> dict[str, Any]:
+    """
+    Normalize every retrieval hit into one shared result shape before merge/rank.
+
+    Handles:
+    - SQLite exact query
+    - SQLite filename
+    - SQLite tag/entity
+    - SQLite metadata/text/OCR
+    - Chroma semantic chunks
+    """
+
+    source = item.get("source") or default_source
+    match_type = item.get("match_type") or default_match_type
+
+    file_id = (
+            item.get("file_id")
+            or item.get("id")
+            or item.get("sqlite_file_id")
+    )
+
+    created_at = (
+            item.get("created_at")
+            or item.get("exif_capture_time")
+            or item.get("drive_created_time")
+            or item.get("first_seen_at")
+            or item.get("drive_modified_time")
+    )
+
+    text = (
+            item.get("text")
+            or item.get("visual_summary")
+            or item.get("image_caption")
+            or item.get("ocr_text")
+            or item.get("extracted_text")
+            or item.get("content_summary")
+    )
+
+    ocr_text = item.get("ocr_text"),
+    extracted_text = item.get("extracted_text"),
+    image_caption = item.get("image_caption"),
+    visual_summary = item.get("visual_summary"),
+    content_summary = item.get("content_summary"),
+
+    why_matched = item.get("why_matched")
+    if not isinstance(why_matched, dict):
+        why_matched = {
+            "reason": str(why_matched) if why_matched else None,
+        }
+
+    raw_score = normalize_score(item.get("score"))
+
+    result = RetrievalResult(
+        source=str(source),
+        match_type=str(match_type),
+        file_id=file_id,
+
+        file_name=item.get("file_name"),
+        drive_file_id=item.get("drive_file_id"),
+        drive_web_link=item.get("drive_web_link"),
+        mime_type=item.get("mime_type"),
+        source_folder=item.get("source_folder"),
+        file_category=item.get("file_category"),
+        processing_status=item.get("processing_status"),
+
+        drive_created_time=item.get("drive_created_time"),
+        drive_modified_time=item.get("drive_modified_time"),
+        exif_capture_time=item.get("exif_capture_time"),
+        first_seen_at=item.get("first_seen_at"),
+        last_synced_at=item.get("last_synced_at"),
+        last_processed_at=item.get("last_processed_at"),
+        created_at=created_at,
+
+        chunk_id=item.get("chunk_id"),
+        chunk_type=item.get("chunk_type"),
+        text=text,
+
+        entity_type=item.get("entity_type"),
+        entity_value=item.get("entity_value"),
+
+        score=raw_score,
+        distance=item.get("distance"),
+
+        matched_fields=item.get("matched_fields") or [],
+        matched_terms=item.get("matched_terms") or [],
+        match_reasons=item.get("match_reasons") or [],
+        match_snippets=item.get("match_snippets") or {},
+
+        why_matched=why_matched,
+        raw=item,
+    )
+
+    return result.to_dict()
+
+
+def normalize_retrieval_results(
+        items: list[dict[str, Any]],
+        default_source: str,
+        default_match_type: str,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+
+    for item in items:
+        if item.get("error"):
+            normalized.append(item)
+            continue
+
+        normalized.append(
+            normalize_retrieval_result(
+                item=item,
+                default_source=default_source,
+                default_match_type=default_match_type,
+            )
+        )
+
+    return normalized
 
 
 def build_match_reason(item: dict[str, Any]) -> dict[str, Any]:
+    preview_text = (
+            item.get("text")
+            or item.get("visual_summary")
+            or item.get("image_caption")
+            or item.get("ocr_text")
+            or item.get("extracted_text")
+            or item.get("content_summary")
+            or ""
+    )
+
+    sqlite_match_reasons = item.get("match_reasons")
+    if not isinstance(sqlite_match_reasons, list):
+        sqlite_match_reasons = []
+
+    matched_terms: list[str] = []
+
+    for reason in sqlite_match_reasons:
+        if "contains '" in str(reason):
+            try:
+                matched_terms.append(str(reason).split("contains '", 1)[1].split("'", 1)[0])
+            except IndexError:
+                pass
+
     return {
         "source": item.get("source"),
         "match_type": item.get("match_type"),
         "chunk_type": item.get("chunk_type"),
+
+        "matched_fields": item.get("matched_fields", []),
+        "matched_terms": item.get("matched_terms", []),
+        "sqlite_match_reasons": sqlite_match_reasons,
+        "match_snippets": item.get("match_snippets", {}),
+
         "score": item.get("score"),
         "distance": item.get("distance"),
         "why_matched": item.get("why_matched"),
-        "text_preview": (item.get("text") or "")[:300],
+        "text_preview": preview_text[:300],
+    }
+
+
+def classify_query_intent(query: str) -> dict:
+    q = (query or "").strip()
+    q_lower = q.lower()
+    words = q_lower.split()
+
+    has_image_word = any(word in IMAGE_DATE_KEYWORDS for word in words)
+
+    asks_first = any(word in FIRST_DATE_KEYWORDS for word in words)
+
+    asks_last = (
+            any(word in LAST_DATE_KEYWORDS for word in words)
+            or "most recent" in q_lower
+    )
+
+    return {
+        "query": q,
+        "is_short_query": len(q) <= 3,
+        "is_single_word": len(words) == 1,
+        "looks_like_filename_query": "." in q or len(q) <= 4,
+        "should_use_semantic": len(q) > 3,
+
+        # New fields
+        "has_image_word": has_image_word,
+        "asks_first": asks_first,
+        "asks_last": asks_last,
+        "is_image_date_query": has_image_word and (asks_first or asks_last),
+        "date_sort_direction": "asc" if asks_first else "desc" if asks_last else None,
     }
 
 
@@ -257,17 +736,137 @@ def normalize_score(value: float | int | None, default: float = 0.0) -> float:
     return value
 
 
-def calculate_result_score(
-    item: dict[str, Any],
-    query: str,
-) -> float:
+def build_search_result_explanation(item: dict[str, Any]) -> dict[str, Any]:
+    reasons = item.get("match_reasons", [])
+
+    matched_fields: set[str] = set()
+    matched_terms: set[str] = set()
+    matched_sources: set[str] = set()
+    matched_types: set[str] = set()
+    matched_chunk_types: set[str] = set()
+
+    score_breakdowns: list[dict[str, Any]] = []
+    chroma_distances: list[dict[str, Any]] = []
+
+    for reason in reasons:
+        for field_name in reason.get("matched_fields", []) or []:
+            matched_fields.add(str(field_name))
+
+        for term in reason.get("matched_terms", []) or []:
+            matched_terms.add(str(term))
+
+        if reason.get("source"):
+            matched_sources.add(str(reason.get("source")))
+
+        if reason.get("match_type"):
+            matched_types.add(str(reason.get("match_type")))
+
+        if reason.get("chunk_type"):
+            matched_chunk_types.add(str(reason.get("chunk_type")))
+
+        if reason.get("score_breakdown"):
+            score_breakdowns.append(reason["score_breakdown"])
+
+        if reason.get("source") == "chroma":
+            chroma_distances.append(
+                {
+                    "chunk_type": reason.get("chunk_type"),
+                    "distance": reason.get("distance"),
+                    "score": reason.get("score"),
+                    "preview": reason.get("text_preview"),
+                }
+            )
+
+    return {
+        "file_id": item.get("file_id"),
+        "file_name": item.get("file_name"),
+
+        "matched_fields": sorted(matched_fields),
+        "matched_terms": sorted(matched_terms),
+        "matched_sources": sorted(matched_sources),
+        "matched_types": sorted(matched_types),
+        "matched_chunk_types": sorted(matched_chunk_types),
+
+        "rank_score": item.get("rank_score"),
+        "best_match_score": item.get("best_match_score"),
+        "match_count": item.get("match_count"),
+        "multi_signal_boost": item.get("multi_signal_boost"),
+
+        "score_breakdown": score_breakdowns,
+        "chroma_distances": chroma_distances,
+
+        "date_boost": {
+            "applied": bool(item.get("date_boost_applied")),
+            "reason": item.get("date_boost_reason"),
+            "date_field": item.get("date_boost_field"),
+            "date_value": item.get("date_boost_value"),
+        },
+
+        "raw_match_reasons": reasons,
+    }
+
+
+def apply_date_based_ranking(
+        results: list[dict[str, Any]],
+        intent: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not intent.mode == QueryMode.DATE_BASED_SEARCH and intent.target_file_type == "image":
+        return results
+
+    image_results = [
+        item for item in results
+        if is_image_like_result(item)
+    ]
+
+    for item in image_results:
+        image_date = get_image_event_datetime(item)
+        date_source = get_image_event_date_source(item)
+
+        item["image_event_datetime"] = image_date.isoformat() if image_date else None
+        item["image_event_date_source"] = date_source
+
+        item["date_boost_applied"] = image_date is not None
+        item["date_boost_field"] = date_source
+        item["date_boost_value"] = image_date.isoformat() if image_date else None
+
+        if image_date and intent.get("asks_first"):
+            item["date_boost_reason"] = (
+                f"Image date query requested earliest image. "
+                f"Sorted using {date_source}."
+            )
+        elif image_date and intent.get("asks_last"):
+            item["date_boost_reason"] = (
+                f"Image date query requested latest image. "
+                f"Sorted using {date_source}."
+            )
+        else:
+            item["date_boost_reason"] = None
+
+    reverse = intent.get("date_sort_direction") == "desc"
+
+    image_results.sort(
+        key=lambda item: (
+            get_image_event_datetime(item) is not None,
+            get_image_event_datetime(item) or "",
+            item.get("rank_score") or 0,
+        ),
+        reverse=reverse,
+    )
+
+    return image_results
+
+
+def calculate_score_breakdown(
+        item: dict[str, Any],
+        query: str,
+) -> dict[str, Any]:
     match_type = item.get("match_type")
     chunk_type = item.get("chunk_type")
 
     raw_score = normalize_score(item.get("score"))
 
-    match_type_boost = MATCH_TYPE_WEIGHTS.get(match_type, 0.50)
-    chunk_type_boost = CHUNK_TYPE_WEIGHTS.get(chunk_type, 0.0)
+    match_type_weight = MATCH_TYPE_WEIGHTS.get(match_type, 0.50)
+    chunk_type_weight = CHUNK_TYPE_WEIGHTS.get(chunk_type, 0.0)
 
     searchable_text = " ".join(
         str(value or "")
@@ -281,17 +880,37 @@ def calculate_result_score(
 
     keyword_boost = calculate_keyword_boost(query, searchable_text)
 
-    final_score = raw_score + match_type_boost + chunk_type_boost + keyword_boost
+    final_score = raw_score + match_type_weight + chunk_type_weight + keyword_boost
 
-    return round(final_score, 6)
+    return {
+        "raw_score": round(raw_score, 6),
+        "match_type": match_type,
+        "match_type_weight": round(match_type_weight, 6),
+        "chunk_type": chunk_type,
+        "chunk_type_weight": round(chunk_type_weight, 6),
+        "keyword_boost": round(keyword_boost, 6),
+        "final_score": round(final_score, 6),
+    }
+
+
+def calculate_result_score(
+        item: dict[str, Any],
+        query: str,
+) -> float:
+    breakdown = calculate_score_breakdown(
+        item=item,
+        query=query,
+    )
+
+    return breakdown["final_score"]
 
 
 def semantic_search_chroma(
-    collection: Collection,
-    query: str,
-    limit: int = 10,
-    chunk_types: list[str] | None = None,
-    conn: sqlite3.Connection | None = None,
+        collection: Collection,
+        query: str,
+        limit: int = 10,
+        chunk_types: list[str] | None = None,
+        conn: sqlite3.Connection | None = None,
 ) -> list[dict[str, Any]]:
     """
     Search ChromaDB using semantic similarity.
@@ -725,8 +1344,8 @@ def search_sqlite_by_date_range(
 
 
 def get_file_by_id(
-    conn: sqlite3.Connection,
-    file_id: int,
+        conn: sqlite3.Connection,
+        file_id: int,
 ) -> dict[str, Any] | None:
     """
     Fetch file-level metadata from SQLite.
@@ -773,17 +1392,30 @@ def get_file_by_id(
 
 
 def merge_result_into_file(
-    existing: dict[str, Any],
-    incoming: dict[str, Any],
-    query: str,
+        existing: dict[str, Any],
+        incoming: dict[str, Any],
+        query: str,
 ) -> dict[str, Any]:
     existing_reasons = existing.setdefault("match_reasons", [])
-    existing_reasons.append(build_match_reason(incoming))
 
-    existing["match_count"] = len(existing_reasons)
+    positive_reasons = [
+        r for r in existing_reasons
+        if normalize_score(r.get("score")) > 0
+    ]
 
-    incoming_rank_score = calculate_result_score(incoming, query)
+    existing["match_count"] = len(positive_reasons)
+
+    score_breakdown = calculate_score_breakdown(
+        item=incoming,
+        query=query,
+    )
+
+    incoming_rank_score = score_breakdown["final_score"]
     existing_rank_score = normalize_score(existing.get("rank_score"))
+
+    reason = build_match_reason(incoming)
+    reason["score_breakdown"] = score_breakdown
+    existing_reasons.append(reason)
 
     existing["rank_score"] = round(existing_rank_score + incoming_rank_score, 6)
 
@@ -792,15 +1424,16 @@ def merge_result_into_file(
         incoming_rank_score,
     )
 
-    existing["matched_sources"] = sorted(
-        set(existing.get("matched_sources", []))
-        | {str(incoming.get("source"))}
-    )
+    if normalize_score(incoming.get("score")) > 0:
+        existing["matched_sources"] = sorted(
+            set(existing.get("matched_sources", []))
+            | {str(incoming.get("source"))}
+        )
 
-    existing["matched_types"] = sorted(
-        set(existing.get("matched_types", []))
-        | {str(incoming.get("match_type"))}
-    )
+        existing["matched_types"] = sorted(
+            set(existing.get("matched_types", []))
+            | {str(incoming.get("match_type"))}
+        )
 
     if incoming.get("chunk_type"):
         existing["matched_chunk_types"] = sorted(
@@ -833,12 +1466,12 @@ def merge_result_into_file(
 
 
 def search_all(
-    conn: sqlite3.Connection,
-    collection: Collection,
-    query: str,
-    limit: int = 10,
-    semantic_limit: int = 25,
-    include_ocr: bool = False,
+        conn: sqlite3.Connection,
+        collection: Collection,
+        query: str,
+        limit: int = 10,
+        semantic_limit: int = 25,
+        include_ocr: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Search across SQLite and ChromaDB, merge results by file_id,
@@ -857,6 +1490,12 @@ def search_all(
     query = query.strip()
 
     all_results: list[dict[str, Any]] = []
+    intent = classify_query_intent(query)
+
+    if intent["is_short_query"]:
+        include_semantic = False
+    else:
+        include_semantic = True
 
     # 1. SQLite broad metadata/text query
     try:
@@ -866,10 +1505,13 @@ def search_all(
             limit=limit * 3,
         )
 
-        for item in sqlite_query_results:
-            item["source"] = item.get("source") or "sqlite"
-            item["match_type"] = item.get("match_type") or "exact_query"
-            all_results.append(item)
+        sqlite_query_results = normalize_retrieval_results(
+            items=sqlite_query_results,
+            default_source="sqlite",
+            default_match_type="exact_query",
+        )
+
+        all_results.extend(sqlite_query_results)
 
     except Exception as error:
         all_results.append(
@@ -889,10 +1531,13 @@ def search_all(
             limit=limit * 3,
         )
 
-        for item in filename_results:
-            item["source"] = item.get("source") or "sqlite"
-            item["match_type"] = item.get("match_type") or "file_name"
-            all_results.append(item)
+        filename_results = normalize_retrieval_results(
+            items=filename_results,
+            default_source="sqlite",
+            default_match_type="file_name",
+        )
+
+        all_results.extend(filename_results)
 
     except Exception as error:
         all_results.append(
@@ -912,10 +1557,13 @@ def search_all(
             limit=limit * 3,
         )
 
-        for item in tag_results:
-            item["source"] = item.get("source") or "sqlite"
-            item["match_type"] = item.get("match_type") or "tag"
-            all_results.append(item)
+        tag_results = normalize_retrieval_results(
+            items=tag_results,
+            default_source="sqlite",
+            default_match_type="tag",
+        )
+
+        all_results.extend(tag_results)
 
     except Exception as error:
         all_results.append(
@@ -937,29 +1585,54 @@ def search_all(
     if include_ocr:
         semantic_chunk_types.append("ocr_text")
 
-    try:
-        semantic_results = semantic_search_chroma(
-            collection=collection,
-            conn=conn,
-            query=query,
-            limit=semantic_limit,
-            chunk_types=semantic_chunk_types,
-        )
+    if intent["should_use_semantic"]:
+        try:
+            semantic_results = semantic_search_chroma(
+                collection=collection,
+                conn=conn,
+                query=query,
+                limit=semantic_limit,
+                chunk_types=semantic_chunk_types,
+            )
 
-        for item in semantic_results:
-            item["source"] = item.get("source") or "chroma"
-            item["match_type"] = item.get("match_type") or "semantic"
-            all_results.append(item)
+            semantic_results = [
+                item for item in semantic_results
+                if is_semantic_match_acceptable(item)
+            ]
 
-    except Exception as error:
-        all_results.append(
-            {
-                "source": "chroma",
-                "match_type": "semantic",
-                "error": str(error),
-                "score": 0,
+            semantic_results = normalize_retrieval_results(
+                items=semantic_results,
+                default_source="chroma",
+                default_match_type="semantic",
+            )
+
+            all_results.extend(semantic_results)
+
+        except Exception as error:
+            all_results.append(
+                {
+                    "source": "chroma",
+                    "match_type": "semantic",
+                    "error": str(error),
+                    "score": 0,
+                }
+            )
+
+    # Every non-error result should now have the same normalized core keys.
+    for item in all_results:
+        if item.get("error"):
+            continue
+
+        missing_required_keys = [
+            key for key in ["source", "match_type", "file_id", "score"]
+            if key not in item
+        ]
+
+        if missing_required_keys:
+            item["normalization_warning"] = {
+                "missing_required_keys": missing_required_keys,
             }
-        )
+
 
     # 5. Merge by file_id
     merged_by_file: dict[Any, dict[str, Any]] = {}
@@ -1009,6 +1682,11 @@ def search_all(
 
     ranked_results = list(merged_by_file.values())
 
+    ranked_results = [
+        item for item in ranked_results
+        if should_keep_merged_result(item)
+    ]
+
     # 6. Extra bonus for files with multiple independent signals
     for item in ranked_results:
         source_count = len(item.get("matched_sources", []))
@@ -1033,14 +1711,24 @@ def search_all(
         )
 
     # 7. Sort final results
-    ranked_results.sort(
-        key=lambda item: (
-            item.get("rank_score") or 0,
-            item.get("best_match_score") or 0,
-            item.get("match_count") or 0,
-        ),
-        reverse=True,
-    )
+    if intent.get("is_image_date_query"):
+        ranked_results = apply_date_based_ranking(
+            results=ranked_results,
+            intent=intent,
+        )
+    else:
+        ranked_results.sort(
+            key=lambda item: (
+                item.get("rank_score") or 0,
+                item.get("best_match_score") or 0,
+                item.get("match_count") or 0,
+            ),
+            reverse=True,
+        )
 
-    return ranked_results[:limit]
+    final_results = ranked_results[:limit]
 
+    for item in final_results:
+        item["explanation"] = build_search_result_explanation(item)
+
+    return final_results

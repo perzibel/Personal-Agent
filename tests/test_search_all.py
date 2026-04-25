@@ -18,7 +18,7 @@ def main():
         results = search_all(
             conn=conn,
             collection=collection,
-            query="stroller",
+            query="show me the latest document that is a CV",
             limit=10,
             include_ocr=False,
         )
@@ -38,13 +38,14 @@ def main():
             print(f"Matched sources: {item.get('matched_sources')}")
             print(f"Matched types: {item.get('matched_types')}")
             print(f"Matched chunk types: {item.get('matched_chunk_types')}")
+            print(f"Matched reason: {item.get("match_reasons", [])}")
             print()
 
             print("Why matched:")
             for reason in item.get("match_reasons", []):
                 print(f"- Source: {reason.get('source')}")
                 print(f"  Type: {reason.get('match_type')}")
-                print(f"  Chunk type: {reason.get('chunk_type')}")
+                print(f"  Chunk type: {reason.get('matched_chunk_types')}")
                 print(f"  Score: {reason.get('score')}")
                 print(f"  Distance: {reason.get('distance')}")
 
