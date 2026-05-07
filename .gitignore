@@ -9,3 +9,5 @@ data/tmp/*
 Quick_start.py
 data/agent_memory.db
 data/chroma/*
+data/telegram_uploads/*
+data/telegram_query_results/*
