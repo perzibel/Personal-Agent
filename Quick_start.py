@@ -15,8 +15,11 @@ from app.config import (
     SCREENSHOTS_FOLDER,
 )
 
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.metadata.readonly"]
-
+SCOPES = [
+    scope.strip()
+    for scope in os.getenv("GOOGLE_SCOPES", "").split(",")
+    if scope.strip()
+]
 
 def get_drive_service():
     creds = None
