@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     files_updated INTEGER DEFAULT 0,
     files_failed INTEGER DEFAULT 0,
     notes TEXT
-);
+
 
 CREATE INDEX IF NOT EXISTS idx_files_drive_file_id ON files(drive_file_id);
 CREATE INDEX IF NOT EXISTS idx_files_file_category ON files(file_category);

@@ -18,7 +18,7 @@ def main():
         results = search_all(
             conn=conn,
             collection=collection,
-            query="show me the latest document that is a CV",
+            query="find Liron CV",
             limit=10,
             include_ocr=False,
         )

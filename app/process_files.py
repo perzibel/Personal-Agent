@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,7 +32,12 @@ from app.config import (
     VISION_GENERATE_JSON,
 )
 
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+SCOPES = [
+    scope.strip()
+    for scope in os.getenv("GOOGLE_SCOPES", "").split(",")
+    if scope.strip()
+]
+
 if TESSERACT_CMD:
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 

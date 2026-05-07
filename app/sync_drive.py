@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import sqlite3
 from datetime import datetime, timezone
@@ -18,8 +19,11 @@ from app.config import (
     GOOGLE_TOKEN_PATH,
 )
 
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-
+SCOPES = [
+    scope.strip()
+    for scope in os.getenv("GOOGLE_SCOPES", "").split(",")
+    if scope.strip()
+]
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()

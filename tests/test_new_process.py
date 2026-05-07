@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+import os
+
 from tqdm import tqdm
 
 import io
@@ -31,7 +34,12 @@ from app.config import (
     VISION_GENERATE_JSON,
 )
 
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+SCOPES = [
+    scope.strip()
+    for scope in os.getenv("GOOGLE_SCOPES", "").split(",")
+    if scope.strip()
+]
+
 if TESSERACT_CMD:
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
